@@ -27,6 +27,10 @@ import java.util.Set;
 import java.util.TreeSet;
 
 import org.apache.hadoop.hive.ql.exec.tez.ReduceRecordSource;
+import org.apache.hadoop.hive.ql.exec.tez.monitoring.SkewedJoinMonitor;
+import org.apache.hadoop.hive.ql.exec.tez.monitoring.SkewedMergeJoinMonitor;
+import org.apache.hadoop.hive.ql.plan.ExprNodeColumnDesc;
+import org.apache.hadoop.hive.ql.plan.ExprNodeDesc;
 import org.apache.hadoop.hive.ql.util.NullOrdering;
 import org.apache.hadoop.hive.serde.serdeConstants;
 import org.slf4j.Logger;
@@ -40,7 +44,6 @@ import org.apache.hadoop.hive.ql.exec.tez.RecordSource;
 import org.apache.hadoop.hive.ql.exec.tez.TezContext;
 import org.apache.hadoop.hive.ql.metadata.HiveException;
 import org.apache.hadoop.hive.ql.plan.CommonMergeJoinDesc;
-import org.apache.hadoop.hive.ql.plan.ExprNodeDesc;
 import org.apache.hadoop.hive.ql.plan.JoinCondDesc;
 import org.apache.hadoop.hive.ql.plan.JoinDesc;
 import org.apache.hadoop.hive.ql.plan.OperatorDesc;
@@ -97,6 +100,10 @@ public class CommonMergeJoinOperator extends AbstractMapJoinOperator<CommonMerge
   transient NullOrdering nullOrdering;
   transient private boolean shortcutUnmatchedRows;
 
+  transient SkewedJoinMonitor skewedMergeJoinMonitor;
+  transient String[] joinSkewKeyColumns;
+  transient String[] joinSkewTableAliases;
+
   /** Kryo ctor. */
   protected CommonMergeJoinOperator() {
     super();
@@ -138,6 +145,18 @@ public class CommonMergeJoinOperator extends AbstractMapJoinOperator<CommonMerge
 
     int oldVar = HiveConf.getIntVar(hconf, HiveConf.ConfVars.HIVE_MAPJOIN_BUCKET_CACHE_SIZE);
     shortcutUnmatchedRows = HiveConf.getBoolVar(hconf, HiveConf.ConfVars.HIVE_JOIN_SHORTCUT_UNMATCHED_ROWS);
+
+    skewedMergeJoinMonitor = SkewedMergeJoinMonitor.createSkewedJoinMonitor(
+            HiveConf.getLongVar(hconf,
+                    HiveConf.ConfVars.HIVE_MERGE_JOIN_SKEW_THRESHOLD),
+            HiveConf.getBoolVar(hconf,
+                    HiveConf.ConfVars.HIVE_MERGE_JOIN_SKEW_ABORT),
+            HiveConf.getLongVar(hconf,
+                    HiveConf.ConfVars.HIVE_MERGE_JOIN_SKEW_CHECK_INTERVAL),
+            maxAlias
+    );
+
+    resolveJoinColumns(maxAlias);
 
     if (oldVar != 100) {
       bucketSize = oldVar;
@@ -220,6 +239,58 @@ public class CommonMergeJoinOperator extends AbstractMapJoinOperator<CommonMerge
     }
 
     return retval;
+  }
+
+  /*
+   * Tries to resolve the original column names for join operation. If that fails (union join) uses column aliases
+   */
+  private void resolveJoinColumns(int maxAlias) {
+    joinSkewKeyColumns = new String[maxAlias];
+    joinSkewTableAliases = new String[maxAlias];
+
+    RowSchema schema = getSchema();
+
+    for (byte pos = 0; pos < order.length; pos++) {
+      List<ExprNodeDesc> keyExprs = conf.getKeys().get(pos);
+      if (keyExprs != null && !keyExprs.isEmpty()) {
+        StringBuilder colNames = new StringBuilder();
+        String resolvedTableAlias = null;
+        for (int i = 0; i < keyExprs.size(); i++) {
+          if (i > 0) {
+            colNames.append(", ");
+          }
+          ExprNodeDesc expr = keyExprs.get(i);
+          if (expr != null) {
+            String internalName = (expr instanceof ExprNodeColumnDesc)
+                    ? ((ExprNodeColumnDesc) expr).getColumn()
+                    : expr.getExprString();
+            ColumnInfo ci = schema != null ? schema.getColumnInfo(internalName) : null;
+            if (ci != null) {
+              colNames.append(ci.getAlias() != null ? ci.getAlias() : internalName);
+              if (resolvedTableAlias == null) {
+                if (ci.getTabAlias() != null) {
+                  resolvedTableAlias = ci.getTabAlias();
+                } else if (expr instanceof ExprNodeColumnDesc) {
+                  resolvedTableAlias = ((ExprNodeColumnDesc) expr).getTabAlias();
+                }
+              }
+            } else {
+              // Schema lookup failed (e.g. union join): use internal name for column,
+              // but still try to get table alias from the expression itself
+              colNames.append(internalName);
+              if (resolvedTableAlias == null && expr instanceof ExprNodeColumnDesc) {
+                resolvedTableAlias = ((ExprNodeColumnDesc) expr).getTabAlias();
+              }
+            }
+          }
+        }
+        joinSkewKeyColumns[pos] = colNames.toString();
+        joinSkewTableAliases[pos] = resolvedTableAlias != null ? resolvedTableAlias : "unknown";
+      } else {
+        joinSkewKeyColumns[pos] = "unknown";
+        joinSkewTableAliases[pos] = "unknown";
+      }
+    }
   }
 
   @Override
@@ -322,6 +393,11 @@ public class CommonMergeJoinOperator extends AbstractMapJoinOperator<CommonMerge
 
     assert !nextKeyGroup;
     candidateStorage[tag].addRow(value);
+
+    if (tag == posBigTable) {
+      skewedMergeJoinMonitor.checkMergeJoinSkew(alias, candidateStorage[tag].rowCount(),
+          joinSkewKeyColumns[posBigTable], joinSkewTableAliases[posBigTable]);
+    }
   }
 
   private void emitUnmatchedRows(int tag, boolean force) throws HiveException {
