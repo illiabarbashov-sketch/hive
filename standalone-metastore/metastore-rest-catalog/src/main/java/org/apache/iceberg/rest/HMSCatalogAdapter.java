@@ -26,6 +26,7 @@ import java.io.IOException;
 import java.time.Clock;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import javax.servlet.http.HttpServletResponse;
 import org.apache.iceberg.BaseTable;
@@ -359,10 +360,13 @@ public class HMSCatalogAdapter implements Closeable {
   }
 
   private RESTResponse dropTable(Map<String, String> vars) {
+    TableIdentifier ident = identFromPathVars(vars);
     if (PropertyUtil.propertyAsBoolean(vars, "purgeRequested", false)) {
-      CatalogHandlers.purgeTable(catalog, identFromPathVars(vars));
+      String location = catalog.loadTable(ident).location();
+      icebergAuthorizer.validateDropTablePurge(catalogName, ident, location);
+      CatalogHandlers.purgeTable(catalog, ident);
     } else {
-      CatalogHandlers.dropTable(catalog, identFromPathVars(vars));
+      CatalogHandlers.dropTable(catalog, ident);
     }
     return null;
   }
@@ -375,12 +379,20 @@ public class HMSCatalogAdapter implements Closeable {
 
   private LoadTableResponse loadTable(Map<String, String> vars) {
     TableIdentifier ident = identFromPathVars(vars);
-    return CatalogHandlers.loadTable(catalog, ident);
+    String snapshots = vars.get(RESTCatalogProperties.SNAPSHOTS_QUERY_PARAMETER);
+    RESTCatalogProperties.SnapshotMode mode = RESTCatalogProperties.SNAPSHOT_LOADING_MODE_DEFAULT;
+    if (snapshots != null) {
+      mode = RESTCatalogProperties.SnapshotMode.valueOf(snapshots.toUpperCase(Locale.ROOT));
+    }
+    return CatalogHandlers.loadTable(catalog, ident, mode);
   }
 
   private LoadTableResponse registerTable(Map<String, String> vars, Object body) {
     Namespace namespace = namespaceFromPathVars(vars);
     RegisterTableRequest request = castRequest(RegisterTableRequest.class, body);
+    request.validate();
+    Map<String, String> namespaceMetadata = asNamespaceCatalog.loadNamespaceMetadata(namespace);
+    icebergAuthorizer.validateRegisterTable(catalogName, namespace, namespaceMetadata, request);
     return CatalogHandlers.registerTable(catalog, namespace, request);
   }
 

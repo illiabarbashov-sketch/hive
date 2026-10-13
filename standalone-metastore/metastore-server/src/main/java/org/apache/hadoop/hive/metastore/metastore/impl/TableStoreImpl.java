@@ -23,6 +23,7 @@ import com.google.common.base.Joiner;
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 
+import javax.jdo.PersistenceManager;
 import javax.jdo.Query;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -51,11 +52,13 @@ import org.apache.hadoop.hive.common.TableName;
 import org.apache.hadoop.hive.metastore.Batchable;
 import org.apache.hadoop.hive.metastore.DatabaseProduct;
 import org.apache.hadoop.hive.metastore.Deadline;
+import org.apache.hadoop.hive.metastore.ObjectStore;
 import org.apache.hadoop.hive.metastore.api.Order;
 import org.apache.hadoop.hive.metastore.api.SerDeInfo;
 import org.apache.hadoop.hive.metastore.api.SkewedInfo;
 import org.apache.hadoop.hive.metastore.api.SourceTable;
 import org.apache.hadoop.hive.metastore.api.StorageDescriptor;
+import org.apache.hadoop.hive.metastore.api.TableParamsUpdate;
 import org.apache.hadoop.hive.metastore.directsql.MetaStoreDirectSql;
 import org.apache.hadoop.hive.metastore.PartFilterExprUtil;
 import org.apache.hadoop.hive.metastore.PartitionExpressionProxy;
@@ -146,7 +149,6 @@ import static org.apache.hadoop.hive.metastore.utils.StringUtils.normalizeIdenti
 @SuppressWarnings("unchecked")
 public class TableStoreImpl extends RawStoreBundle implements TableStore {
   private final static Logger LOG = LoggerFactory.getLogger(TableStoreImpl.class);
-  private DatabaseProduct dbType;
   protected int batchSize = NO_BATCHING;
   private boolean areTxnStatsSupported = false;
   private PartitionExpressionProxy expressionProxy = null;
@@ -155,7 +157,6 @@ public class TableStoreImpl extends RawStoreBundle implements TableStore {
   @Override
   public void setBaseStore(RawStore store) {
     super.setBaseStore(store);
-    this.dbType = PersistenceManagerProvider.getDatabaseProduct();
     this.batchSize = MetastoreConf.getIntVar(store.getConf(),
         MetastoreConf.ConfVars.RAWSTORE_PARTITION_BATCH_SIZE);
     this.areTxnStatsSupported = MetastoreConf.getBoolVar(baseStore.getConf(),
@@ -442,7 +443,7 @@ public class TableStoreImpl extends RawStoreBundle implements TableStore {
       return;
     }
     LOG.debug("execute removeUnusedColumnDescriptor");
-    if (!hasRemainingCDReference(oldCD)) {
+    if (!hasRemainingCDReference(pm, oldCD)) {
       // First remove any constraints that may be associated with this CD
       Query query = pm.newQuery(MConstraint.class, "parentColumn == inCD || childColumn == inCD");
       query.declareParameters("MColumnDescriptor inCD");
@@ -464,8 +465,9 @@ public class TableStoreImpl extends RawStoreBundle implements TableStore {
    * @param oldCD the column descriptor to check if it has references or not
    * @return true if has references
    */
-  private boolean hasRemainingCDReference(MColumnDescriptor oldCD) {
+  public static boolean hasRemainingCDReference(PersistenceManager pm, MColumnDescriptor oldCD) {
     assert oldCD != null;
+    DatabaseProduct dbType = PersistenceManagerProvider.getDatabaseProduct();
     Query query;
     /**
      * In order to workaround oracle not supporting limit statement caused performance issue, HIVE-9447 makes
@@ -2067,7 +2069,12 @@ public class TableStoreImpl extends RawStoreBundle implements TableStore {
   @Override
   public List<Partition> getPartitionSpecsByFilterAndProjection(Table table,
       GetProjectionsSpec partitionsProjectSpec,
-      GetPartitionsFilterSpec filterSpec) throws MetaException, NoSuchObjectException {
+      GetPartitionsFilterSpec rawFilterSpec) throws MetaException, NoSuchObjectException {
+    // filterSpec is an optional field on the thrift request (e.g. SHOW TABLE EXTENDED without a
+    // PARTITION clause leaves it unset to mean "no filter"); normalize once here so the SQL/JDO
+    // code paths below can treat it uniformly instead of null-checking at every usage site.
+    final GetPartitionsFilterSpec filterSpec =
+        rawFilterSpec != null ? rawFilterSpec : new GetPartitionsFilterSpec();
     List<String> fieldList = null;
     String inputIncludePattern = null;
     String inputExcludePattern = null;
@@ -2893,6 +2900,28 @@ public class TableStoreImpl extends RawStoreBundle implements TableStore {
     result = getMPartition(catName, dbName, tblName, name);
 
     return result;
+  }
+
+  @Override
+  public void updateTableParams(List<Map.Entry<TableParamsUpdate, Table>> updates) throws MetaException, NoSuchObjectException {
+    if (updates == null || updates.isEmpty()) {
+      return;
+    }
+    new GetListHelper<TableName, Void>(this, null) {
+      @Override
+      protected List<Void> getSqlResult() throws MetaException {
+        getDirectSql().updateTableParams(updates);
+        return null;
+      }
+      @Override
+      protected boolean canUseJdoQuery() {
+        return false;
+      }
+      @Override
+      protected List<Void> getJdoResult() {
+        throw new UnsupportedOperationException("UnsupportedOperationException");
+      }
+    }.run(false);
   }
 
   /**
