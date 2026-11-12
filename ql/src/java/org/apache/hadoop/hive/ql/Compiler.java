@@ -139,6 +139,7 @@ public class Compiler {
 
   private void initialize(String rawCommand) throws CommandProcessorException {
     perfLogger.perfLogBegin(CLASS_NAME, PerfLogger.COMPILE);
+    org.apache.hadoop.hive.ql.metadata.client.HmsRpcCounter.reset();
     driverState.compilingWithLocking();
 
     VariableSubstitution variableSubstitution = new VariableSubstitution(
@@ -506,6 +507,7 @@ public class Compiler {
 
   private void cleanUp(Throwable compileException, boolean parsed, boolean deferClose) {
     double duration = perfLogger.perfLogEnd(CLASS_NAME, PerfLogger.COMPILE) / 1000.00;
+    org.apache.hadoop.hive.ql.metadata.client.HmsRpcCounter.logAndReset(driverContext.getQueryId(), duration);
     // Trigger post compilation hook. Note that if the compilation fails here then
     // before/after execution hook will never be executed.
     if (parsed) {

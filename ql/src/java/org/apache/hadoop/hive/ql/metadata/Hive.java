@@ -6142,6 +6142,7 @@ private void constructOneLBLocationMap(FileStatus fSta,
     };
 
     HiveMetaStoreClientBuilder msClientBuilder = new HiveMetaStoreClientBuilder(conf, allowEmbedded)
+        .enhanceWith(org.apache.hadoop.hive.ql.metadata.client.HmsRpcCounter::wrap)
         .enhanceWith(client ->
             HiveMetaStoreClientWithLocalCache.newClient(conf, client))
         .enhanceWith(client ->
