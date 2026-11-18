@@ -22,6 +22,7 @@ package org.apache.hadoop.hive.cli.control;
 import org.apache.hadoop.hive.ql.QTestArguments;
 import org.apache.hadoop.hive.ql.QTestProcessExecResult;
 import org.apache.hadoop.hive.ql.QTestUtil;
+import org.apache.hadoop.hive.ql.metadata.events.NotificationEventPoll;
 import org.apache.hadoop.hive.ql.QTestMiniClusters.MiniClusterType;
 import org.apache.hadoop.hive.ql.processors.CommandProcessorException;
 import org.junit.internal.AssumptionViolatedException;
@@ -56,10 +57,17 @@ public class CorePerfCliDriver extends CliAdapter {
         .withCleanupScript(cleanupScript).withLlapIo(false)
         .withCustomConfigValueMap(cliConfig.getCustomConfigValueMap())
         .build());
+    // MEASUREMENT (HIVE-30264): HS2 starts the notification event poll; a q-test does not. By name, so that
+    // this also builds against a Hive without the setting.
+    if (qt.getConf().getBoolean("hive.server2.metadata.cache.events.enabled", false)) {
+      NotificationEventPoll.initialize(qt.getConf());
+      LOG.info("Notification event poll started for the HS2 metadata cache");
+    }
   }
 
   @Override
   public void shutdown() throws Exception {
+    NotificationEventPoll.shutdown();
     qt.shutdown();
   }
 
