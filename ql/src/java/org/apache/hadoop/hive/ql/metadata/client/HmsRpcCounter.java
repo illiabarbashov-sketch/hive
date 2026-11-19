@@ -26,7 +26,9 @@ import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 
+import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.metastore.IMetaStoreClient;
+import org.apache.hadoop.hive.ql.metadata.Hive;
 import org.apache.hadoop.hive.ql.session.SessionState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,7 +63,12 @@ public final class HmsRpcCounter {
     if (ss == null) {
       return false;
     }
-    String queryId = MetaStoreClientCacheUtils.getQueryId();
+    // not Hive.get(): it would create a Hive while this thread is still creating one, and wait for itself
+    Hive hive = Hive.getThreadLocal();
+    if (hive == null) {
+      return false;
+    }
+    String queryId = hive.getConf().get(HiveConf.ConfVars.HIVE_QUERY_ID.varname);
     return queryId != null && ss.getQueryCache(queryId) != null;
   }
 

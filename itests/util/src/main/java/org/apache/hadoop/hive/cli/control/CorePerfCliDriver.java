@@ -59,7 +59,7 @@ public class CorePerfCliDriver extends CliAdapter {
         .build());
     // MEASUREMENT (HIVE-30264): HS2 starts the notification event poll; a q-test does not. By name, so that
     // this also builds against a Hive without the setting.
-    if (qt.getConf().getBoolean("hive.server2.metadata.cache.events.enabled", false)) {
+    if (qt.getConf().get("hive.notification.event.consumers", "").contains("MetadataCacheEventConsumer")) {
       NotificationEventPoll.initialize(qt.getConf());
       LOG.info("Notification event poll started for the HS2 metadata cache");
     }
